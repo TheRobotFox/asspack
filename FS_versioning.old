@@ -1,0 +1,143 @@
+#pragma once
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <list>
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+#include <span>
+
+namespace asspack::fs {
+
+    using path = std::filesystem::path;
+    using file_time = std::filesystem::file_time_type;
+
+    class FileData;
+
+    class FS
+    {
+    public:
+        virtual auto load(path) -> FileData = 0;
+        virtual auto unload(path) -> void = 0;
+    };
+
+    class Memory : public FS
+    {
+        struct info {
+            std::size_t offset;
+            std::size_t size;
+        };
+
+    protected:
+        using Header = std::unordered_map<path, info>;
+        Header m_header;
+        std::span<uint8_t> m_data;
+
+    public:
+
+        auto load(path file) -> FileData override;
+        auto unload(path file) -> void override;
+
+        Memory(Header head, std::span<uint8_t> data)
+            : m_header(std::move(head)), m_data(data)
+        {}
+    };
+    class DependencyTracker : public FS
+    {
+        const path m_save;
+    public:
+        DependencyTracker(path save = "")
+            : m_save(std::move(save))
+        {}
+        virtual auto get() const -> std::span<path> = 0;
+        ~DependencyTracker();
+    };
+
+    class EditTracker
+    {
+    public:
+        virtual auto has_changed(path file) -> bool = 0;
+    };
+
+    class Storage : public DependencyTracker, public EditTracker
+    {
+        friend FileData;
+        struct Version
+        {
+            std::size_t usage_count {};
+            uint8_t *start, *end;
+        };
+        struct Info {
+            file_time last_change;
+            std::list<Version> versions;
+        };
+    public:
+        auto get() const -> std::span<path> override;
+        auto load(path path) -> FileData override;
+    };
+
+    class FileData : public std::span<uint8_t>
+    {
+        Storage::Info &m_info;
+        Storage::Version &m_data;
+        file_time last_change;
+        FileData(Storage::Info &info)
+            : m_info(info),
+              m_data(info.versions.back()),
+              last_change(info.last_change)
+        {
+            load();
+        }
+        ~FileData()
+        {
+            unload();
+        }
+        auto has_changed() const -> bool
+        {
+            return last_change!=m_info.last_change;
+        }
+        auto unload() -> void
+        {
+            std::span<uint8_t>::operator=({});
+            m_data.usage_count--;
+            if(m_data.usage_count == 0) m_info.versions.remove(m_data);
+        }
+        auto load() -> void
+        {
+            m_data.usage_count++;
+            std::span<uint8_t>::operator=({m_data.start, m_data.end});
+        }
+        auto update() -> bool
+        {
+            unload();
+            m_data = m_info.versions.back();
+            last_change = m_info.last_change;
+            load();
+        }
+    };
+
+    class StorageTracker : public EditTracker, public FSWrapper
+    {
+        using file_time = std::filesystem::file_time_type;
+        std::unordered_map<path, file_time> last_change;
+
+        static file_time get_time(const path& file){return std::filesystem::last_write_time(file);}
+    public:
+        auto has_changed(path file) -> bool override;
+            StorageTracker(std::shared_ptr<FS> fs)
+                : FSWrapper(std::move(fs),
+                        [this](const path& file){
+                            if(last_change.contains(file)){
+
+                            }else
+                                last_change[file]=get_time(file);
+                        })
+            {}
+    };
+}
