@@ -1,0 +1,14 @@
+#+title: Asspack
+* Concept
+ - abstract Asset Loading
+ - Auto Update Assets on filechage
+ - Pack assets into asset Packs
+ - Link pack into binary
+ - Assets Loaded in Background Thread
+* Arch
+** Tasks
+*** Provide Resource Data
+
+*** Check file Update
+*** Load Assets
+*** Track file usage

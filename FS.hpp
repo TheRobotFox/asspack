@@ -88,7 +88,7 @@ namespace asspack::fs {
         struct Block {
             std::size_t offset;
             std::size_t size;
-        };
+    };
 
     protected:
         using Header = std::unordered_map<path, Block>;
