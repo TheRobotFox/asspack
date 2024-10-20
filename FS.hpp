@@ -31,6 +31,7 @@ namespace asspack::fs {
         virtual auto load(const path &) -> std::span<uint8_t> = 0;
         virtual auto contains(const path &) -> bool = 0;
         virtual auto unload(const path &) -> void = 0;
+        virtual ~FS() = default;
     };
 
     class EditTracker
@@ -157,6 +158,8 @@ namespace asspack::fs {
         {
             m_sources.emplace_back(std::move(name), std::move(fs));
         }
+        template<class F>
+            requires std::is_base_of_v<FS, F>
         auto add_bottom(std::string name, std::unique_ptr<F> &&fs) -> void
         {
             m_sources.emplace_front(std::move(name), std::move(fs));
