@@ -1,23 +1,18 @@
 #include "Asset.hpp"
-#include <thread>
-#include <unordered_map>
+#include <utility>
 
-namespace AssPack{
+namespace AssPack {
 
     template<typename T>
-    class AssetManager
+    auto AssetManager::load(const std::string &name) -> Asset<T>
     {
-        inline static AssetManager<T> *self {};
-        std::thread tracker;
-        bool run = true;
-        std::unordered_map<std::string, AssetHandler<T>> data {};
+        // register assets, create Handles
+        // Assets will be loaded once a FS has been registered
+        if(!m_data<T>.contains(name))
+            m_data<T>[name] = {};
 
-    public:
-        static void Init();
-        static void Shutdown();
-
-        auto get() -> AssetManager<T>&;
-        auto load(const std::string &name) -> const AssetHandler<T>&;
-    };
+        if()
+        m_data<T>[name]
+    }
 
 }

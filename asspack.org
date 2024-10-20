@@ -5,10 +5,6 @@
  - Pack assets into asset Packs
  - Link pack into binary
  - Assets Loaded in Background Thread
-* Arch
-** Tasks
-*** Provide Resource Data
-
-*** Check file Update
-*** Load Assets
-*** Track file usage
+* TODO Asset Properties
+- How to load from data
+- default if not yet loaded

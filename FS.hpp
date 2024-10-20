@@ -1,12 +1,14 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <list>
 #include <memory>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -24,63 +26,50 @@ namespace asspack::fs {
     {
     public:
         struct Info {
-            path name;
-            std::size_t usage_count {};
             std::vector<uint8_t> data;
         };
-        virtual auto load(path) -> FileData = 0;
-        virtual auto unload(path) -> void = 0;
-    };
-
-    class DependencyTracker : public FS
-    {
-        const path m_save;
-    public:
-        DependencyTracker(path save = "")
-            : m_save(std::move(save))
-        {}
-        virtual auto get() const -> std::vector<path> = 0;
-        auto save() const -> void;
-        ~DependencyTracker();
+        virtual auto load(const path &) -> std::span<uint8_t> = 0;
+        virtual auto contains(const path &) -> bool = 0;
+        virtual auto unload(const path &) -> void = 0;
     };
 
     class EditTracker
     {
     public:
-        virtual auto has_changed(path file) -> bool = 0;
+        virtual auto has_changed(const path &file) -> bool = 0;
     };
 
-    class Storage : public DependencyTracker, public EditTracker
+    class Storage : public FS, public EditTracker
     {
         struct Info : public FS::Info
         {
             file_time last_change;
         };
         std::unordered_map<path, Info> m_files;
+        path m_directory;
 
     public:
-        auto get() const -> std::vector<path> override;
-        auto load(path path) -> FileData override;
-        auto unload(path path) -> void override;
-        auto has_changed(path file) -> bool override;
-    };
+        Storage(path directory="") : m_directory(std::move(directory))
+        {}
 
-    class FileData : public std::span<uint8_t>
-    {
-        std::shared_ptr<FS> m_parrent;
-        FS::Info *m_info;
-        FileData(std::shared_ptr<FS> fs, FS::Info *info)
-            : std::span<uint8_t>(info->data),
-              m_parrent(std::move(fs)),
-              m_info(info)
+        auto load(const path &file) -> std::span<uint8_t> override // TODO atomic usage counter
         {
-            m_info->usage_count++;
+            m_files[file] = {{read(m_directory/file)}, std::filesystem::last_write_time(file)};
+            return m_files[file].data;
         }
-        ~FileData()
+        auto unload(const path &file) -> void override
         {
-            m_info->usage_count--;
-            if(m_info->usage_count == 0) m_parrent->unload(std::move(m_info->name));
+            m_files.erase(file);
         }
+        auto has_changed(const path &file) -> bool override
+        {
+            return std::filesystem::last_write_time(file)==m_files[file].last_change;
+        }
+        auto contains(const path &file) -> bool override
+        {
+            return std::filesystem::exists(file);
+        }
+        static auto read(const path &file) -> std::vector<uint8_t>;
     };
 
     class Memory : public FS
@@ -88,11 +77,12 @@ namespace asspack::fs {
         struct Block {
             std::size_t offset;
             std::size_t size;
-    };
+        };
 
     protected:
         using Header = std::unordered_map<path, Block>;
         Header m_header;
+        std::optional<std::vector<uint8_t>> m_own {};
         std::span<uint8_t> m_data;
 
         template<class T>
@@ -111,13 +101,18 @@ namespace asspack::fs {
         }
     public:
 
-        auto load(path file) -> FileData override;
-        auto unload(path file) -> void override;
-
-            Memory(std::span<uint8_t> memory) // default ot external _res_bytes[]
-                                              // Overwrite in RespackFS with EditTracker
+        Memory(const path &file)
+            : m_own(Storage::read(file))
         {
-            uint8_t *ptr = memory.data();
+            from_span(*m_own);
+        }
+        Memory(std::span<uint8_t> data)
+        {
+            from_span(data);
+        }
+        auto from_span(std::span<uint8_t> data) ->void
+        {
+            uint8_t *ptr = data.data();
             auto entries = read<uint16_t>(ptr);
 
             while(entries-- > 0) {
@@ -127,16 +122,95 @@ namespace asspack::fs {
 
                 m_header[name] = {offset, size};
             }
-            m_data = {ptr, memory.end().base()};
+            m_data = {ptr, m_data.end().base()};
         }
 
+        auto load(const path &file) -> std::span<uint8_t> override
+        {
+            Block b = m_header[file];
+            return m_data.subspan(b.offset, b.size);
+        }
+        auto unload(const path & /* ignore */) -> void override
+        {}
+        auto contains(const path &file) -> bool override
+        {
+            return m_header.contains(file);
+        }
     };
 
-    class FileProvider
+    class AssetFiles : public FS, public EditTracker
     {
-        // Version Index
+        // maybe setting to keep initial FS from cache
+        struct FileInfo {
+            FS *source;
+        };
+        struct FSInfo {
+            std::string name;
+            std::unique_ptr<FS> fs;
+        };
+        std::unordered_map<path, FileInfo> m_files;
+        std::list<FSInfo> m_sources;
     public:
-        auto get(path file) -> FileData;
-        auto update() -> bool;
+        template<class F>
+            requires std::is_base_of_v<FS, F>
+        auto add_top(std::string name, std::unique_ptr<F> &&fs) -> void
+        {
+            m_sources.emplace_back(std::move(name), std::move(fs));
+        }
+        auto add_bottom(std::string name, std::unique_ptr<F> &&fs) -> void
+        {
+            m_sources.emplace_front(std::move(name), std::move(fs));
+        }
+        auto remove(const std::string &name) -> void
+        {
+            auto it = std::ranges::find_if(m_sources, [&name](FSInfo &info){return info.name==name;});
+            if(it==m_sources.end()) return;
+
+            // free all files associatet with FS(name)
+            std::erase_if(m_files, [&it](const FileInfo &info){return info.source==it->fs.get();});
+            m_sources.erase(it);
+        }
+
+        auto load(const path &file) -> std::span<uint8_t> override
+        {
+            auto it = std::ranges::find_if(m_sources, [&file](auto &info){return info.fs->contains(file);});
+            assert(it!=m_sources.end());
+            if(m_files.contains(file)) m_files[file].source->unload(file);
+            m_files[file].source = it->fs.get();
+            return it->fs->load(file);
+        }
+        auto unload(const path &file) -> void override
+        {
+            m_files[file].source->unload(file);
+        }
+        auto has_changed(const path &file) -> bool override
+        {
+            auto it = std::ranges::find_if(m_sources, [&file](FSInfo &info){return info.fs->contains(file);});
+            assert(it!=m_sources.end());
+
+            if(m_files.contains(file) && m_files[file].source!=it->fs.get()) return true; // if source changes prop best to assume data changed
+
+            if(auto *t = dynamic_cast<EditTracker*>(it->fs.get()); t!=nullptr)
+                return t->has_changed(file);
+            return false;
+        }
+        auto contains(const path &file) -> bool override
+        {
+            auto it = std::ranges::find_if(m_sources, [&file](auto &info){return info.fs->contains(file);});
+            return it!=m_sources.end();
+        }
+    };
+
+    class DependencyTracker : public FS
+    {
+        const path m_save;
+        std::unordered_set<path> dependencies;
+    public:
+        DependencyTracker(path save = "")
+            : m_save(std::move(save))
+        {}
+        auto get() const -> std::vector<path>;
+        auto save() const -> void;
     };
 }
+
