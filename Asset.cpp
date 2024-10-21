@@ -1,5 +1,5 @@
 #include "Asset.hpp"
-
+/*
 namespace asspack {
 
 
@@ -36,3 +36,4 @@ namespace asspack {
 
 
 }
+*/

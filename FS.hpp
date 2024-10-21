@@ -70,7 +70,7 @@ namespace asspack::fs {
         {
             return std::filesystem::exists(file);
         }
-        static auto read(const path &file) -> std::vector<uint8_t>;
+        static auto read(const path &path) -> std::vector<uint8_t>;
     };
 
     class Memory : public FS
@@ -170,7 +170,7 @@ namespace asspack::fs {
             if(it==m_sources.end()) return;
 
             // free all files associatet with FS(name)
-            std::erase_if(m_files, [&it](const FileInfo &info){return info.source==it->fs.get();});
+            std::erase_if(m_files, [&it](const std::pair<path, FileInfo> &info){return info.second.source==it->fs.get();});
             m_sources.erase(it);
         }
 
@@ -214,6 +214,7 @@ namespace asspack::fs {
         {}
         auto get() const -> std::vector<path>;
         auto save() const -> void;
+        ~DependencyTracker() override;
     };
 }
 

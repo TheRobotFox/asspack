@@ -3,7 +3,6 @@
 
 #include "FS.hpp"
 #include <algorithm>
-#include <bits/ranges_algo.h>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -15,7 +14,6 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace asspack{
 
@@ -42,8 +40,10 @@ namespace asspack{
         template<typename T>
         struct Assets {
             struct Derivitate {
-                std::function<T(const T&) const> projection;
-                std::weak_ptr<T> val {};
+                std::unique_ptr<std::function<T(const T&) const>> projection;
+                std::shared_ptr<T> val {}; // TODO weak ptr root
+                                         // unique Assets
+                                         // vs global ?
                 std::optional<T> update;
             };
             std::shared_ptr<T> root {};
@@ -52,9 +52,11 @@ namespace asspack{
             std::list<Derivitate> derivitives {};
         };
         template<typename T>
-        static auto load(const std::string &file, Assets<T> &asset) -> void
+        static auto load(const std::string &file) -> void
         {
             assert(m_fs!=nullptr);
+            Assets<T> &asset = m_data<T>[file];
+
             if(!m_fs->contains(file)){
                 asset.info.state = Info::State::NOFILE;
                 return;
@@ -66,6 +68,47 @@ namespace asspack{
                 asset.info.state = Info::State::BROKEN;
                 return;
             }
+        }
+
+        template<typename T>
+        static auto getAssetGroup(const std::string &name) -> Assets<T>&
+        {
+
+            if(!m_data<T>.contains(name)){
+
+                m_data<T>[name]={};
+
+                if(m_fs)
+                    load<T>(name);
+
+                static bool updateFunction = false;
+                if(!updateFunction){
+                    updateFunction = true;
+                    m_updateFunctions.push_back([&data=m_data<T>](){
+
+                        std::for_each(std::execution::par_unseq,
+                                    data.begin(),
+                                    data.end(),
+                                    [](std::pair<std::string, Assets<T>> &pair)
+                            {
+
+                                Assets<T> &assets = pair.second;
+                                if(!assets.update) return;
+
+                                *(assets.root) = *(assets.update);
+
+                                std::list<typename Assets<T>::Derivitate> &d = assets.derivitives;
+                                std::for_each(std::execution::par_unseq, d.begin(), d.end(),
+                                    [&root=assets.root](typename Assets<T>::Derivitate &d)
+                                    {
+                                        if(!d.update) return;
+                                        *(d.val) = *(d.update);
+                                    });
+                            });
+                    });
+                }
+            }
+            return  m_data<T>[name];
         }
     public:
         static auto Init() -> void;
@@ -83,41 +126,18 @@ namespace asspack{
         template<typename T>
         static auto createHandle(const std::string &name) -> AssetHandle<T>
         {
-
-            if(m_data<T>.contains(name)) return {m_data<T>[name].root, m_data<T>[name].info};
-
-            m_data<T>[name]={};
-
-            if(m_fs)
-                load(m_data<T>[name]);
-
-            static bool updateFunction = false;
-            if(!updateFunction){
-                updateFunction = true;
-                m_updateFunctions.push_back([&data=m_data<T>](){
-
-                    std::for_each(std::execution::par_unseq,
-                                  data.begin(),
-                                  data.end(),
-                                  [](std::pair<std::string, Assets<T>> &pair)
-                        {
-
-                            Assets<T> &assets = pair.second;
-                            if(!assets.update) return;
-
-                            assets.root = *assets.update;
-
-                            std::list<typename Assets<T>::Derivitate> &d = assets.derivitives;
-                            std::for_each(std::execution::par_unseq, d.begin(), d.end(),
-                                [&root=assets.root](typename Assets<T>::Derivitate &d)
-                                {
-                                    if(!d.update) return;
-                                    *d.val = *d.update;
-                                });
-                        });
-                });
-            }
+            Assets<T> &assets = getAssetGroup<T>(name);
+            return {assets.root, assets.info};
         }
+        template<typename T>
+        static auto createDerivitaveHandle(const std::string &name, std::function<T(T)> &&map) -> AssetHandle<T>
+        {
+            Assets<T> &assets = getAssetGroup<T>(name);
+            AssetHandle<T> handler {std::shared_ptr<T>(), assets.info};
+            assets.derivitives.emplace_back(map, handler.m_val, std::nullopt);
+            return {assets.root, assets.info};
+        }
+
     private:
 
         std::thread tracker;
@@ -132,13 +152,13 @@ namespace asspack{
     template<typename T>
     class AssetHandle
     {
-        friend auto AssetManager::load<T>(const std::string &) -> AssetHandle<T>;
+        friend AssetManager;
 
         std::shared_ptr<T> m_val;
 
         const AssetManager::Info &m_info;
         int m_localVersion;
-        AssetHandle(std::shared_ptr<T> &&val, const AssetManager::Info &info)
+        AssetHandle(std::shared_ptr<T> val, const AssetManager::Info &info)
             : m_val(std::move(val)),
                 m_info(info),
                 m_localVersion(info.version)
@@ -164,17 +184,16 @@ namespace asspack{
     template<typename T>
     class Asset : public AssetHandle<T>
     {
-        auto load(const std::span<uint8_t>) const -> std::optional<T>  {
+        friend AssetManager;
+        static auto load(const std::span<uint8_t>) -> std::optional<T> {
             static_assert(false, "Asset::load was not Implemented for used Type!\nPlease supply via template Specialisation");
         };
-        auto getDefault(AssetManager::Info::State state) const -> T {
+        static auto getDefault(AssetManager::Info::State state) -> T {
             static_assert(false, "Asset::load was not Implemented for used Type!\nPlease supply via template Specialisation");
         }
     public:
         Asset(const std::string &name) : AssetHandle<T>(AssetManager::createHandle<T>(name))
-        {
-
-        }
+        {}
     };
 
 

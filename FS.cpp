@@ -7,7 +7,7 @@
 namespace asspack::fs {
 
 
-    auto Storage::read(path path) -> std::vector<uint8_t>
+    auto Storage::read(const path &path) -> std::vector<uint8_t>
     {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         file.unsetf(std::ios::skipws);
@@ -19,17 +19,5 @@ namespace asspack::fs {
                 std::istream_iterator<uint8_t>(),
                 std::back_inserter(res));
         return res;
-    }
-
-    auto Memory::read(path file) -> std::vector<uint8_t>
-    {
-        assert(m_header.contains(file));
-        info info = m_header[file];
-        // std::cout << name << " " << info.offset << " " << info.size << std::endl;
-
-        uint8_t *start = m_data.get()+info.offset;
-        std::vector<uint8_t> v;
-        v.assign(start, start+info.size);
-        return v;
     }
 }

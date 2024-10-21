@@ -24,19 +24,4 @@ namespace asspack::fs {
         save();
     }
 
-    // StorageTracker
-    auto Storage::has_changed(path file) -> bool
-    {
-        assert(m_files.contains(file));
-
-        file_time current = std::filesystem::last_write_time(file);
-        return current!=m_files[file].last_change;
-    }
-
-    auto Storage::get() const -> std::vector<path> {
-        std::vector<path> out;
-        std::ranges::transform(m_files, out, [](auto &pair) { return pair.first; });
-        return out;
-    }
-
 } // namespace asspack::fs
