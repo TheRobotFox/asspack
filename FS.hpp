@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <fstream>
+#include <iterator>
 #include <list>
 #include <memory>
 #include <type_traits>
@@ -37,16 +39,13 @@ namespace asspack::fs {
     class EditTracker
     {
     public:
-        virtual auto has_changed(const path &file) -> bool = 0;
+            virtual auto has_changed(const path &file) -> bool = 0; // TODO Thread safe
     };
 
     class Storage : public FS, public EditTracker
     {
-        struct Info : public FS::Info
-        {
-            file_time last_change;
-        };
-        std::unordered_map<path, Info> m_files;
+        std::unordered_map<path, Info> m_files; // TODO Thread safe
+        std::unordered_map<path, file_time> m_edits;
         path m_directory;
 
     public:
@@ -55,7 +54,8 @@ namespace asspack::fs {
 
         auto load(const path &file) -> std::span<uint8_t> override // TODO atomic usage counter
         {
-            m_files[file] = {{read(m_directory/file)}, std::filesystem::last_write_time(file)};
+            m_files[file] = {read(m_directory/file)};
+            m_edits[file] = {std::filesystem::last_write_time(file)};
             return m_files[file].data;
         }
         auto unload(const path &file) -> void override
@@ -64,13 +64,27 @@ namespace asspack::fs {
         }
         auto has_changed(const path &file) -> bool override
         {
-            return std::filesystem::last_write_time(file)==m_files[file].last_change;
+            if(!m_edits.contains(file)) return true;
+            return std::filesystem::last_write_time(file)!=m_edits[file];
         }
         auto contains(const path &file) -> bool override
         {
             return std::filesystem::exists(file);
         }
-        static auto read(const path &path) -> std::vector<uint8_t>;
+
+        static auto read(const path &path) -> std::vector<uint8_t>
+        {
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            file.unsetf(std::ios::skipws);
+
+            std::vector<uint8_t> res;
+            res.reserve(static_cast<std::size_t>(file.tellg()));
+            file.seekg(0, std::ios::beg);
+            std::copy(std::istream_iterator<uint8_t>(file),
+                    std::istream_iterator<uint8_t>(),
+                    std::back_inserter(res));
+            return res;
+        }
     };
 
     class Memory : public FS

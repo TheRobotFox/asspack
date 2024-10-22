@@ -1,39 +1,66 @@
 #include "Asset.hpp"
-/*
 namespace asspack {
 
-
-
-        auto tracker_run() -> void
+        auto update() -> void
         {
-            using namespace std::ranges;
-            using namespace std::chrono_literals;
-            auto &fs = asset_files;
-            while(run) {
-                std::this_thread::sleep_for(200ms);
+            if(!m_update) return;
+            std::cout << "Updated: " << std::endl;
 
-                for_each(data | views::filter([](auto &pair){return fs.has_changed(pair.first);})
-                         | views::filter([](auto &pair){
-                             auto& [name, handle] = pair;
-                             return !handle.load(fs.read(name));
-                         }), [](auto &pair){std::cout << "[WARNING] "<< pair.first << " Failed to load!";});
+            std::lock_guard<std::mutex> lock(m_mtxSet);
 
+            *(m_root) = std::move(m_update.value().val);
+            m_info.state = m_update.value().state;
+            m_update = {};
+
+            std::for_each(std::execution::par, m_derivitives.begin(), m_derivitives.end(),
+                [](Derivitate &d)
+                {
+                    if(!d.update) return;
+                    *(d.val) = std::move(*(d.update));
+                    d.update = {};
+                });
+        }
+        auto fetch(fs::FS *fs) -> void override
+        {
+            Info::State state;
+
+            if(!fs->contains(m_file)){
+                state = Info::State::NOFILE;
+                return;
             }
-        }
+            if(!dynamic_cast<fs::EditTracker*>(fs)->has_changed(m_file)) return;
+            std::cout << "Changed: " << m_file << std::endl;
 
-        AssetManager()
+            std::span<uint8_t> data = fs->load(m_file);
+            std::optional<T> loaded = Asset<T>::load(data);
+            if(!loaded){
+                state = Info::State::BROKEN;
+                return;
+            }
+            state = Info::State::LOADED;
+
+
+            std::lock_guard<std::mutex> lock(m_mtxUpd);
+
+            m_update.emplace(*loaded, state);
+            std::for_each(std::execution::par, m_derivitives.begin(), m_derivitives.end(),
+                [&loaded](Derivitate &d)
+                {
+                    std::cout << "update D" << std::endl;
+                    (d.update) = d.projection(*loaded);
+                });
+        }
+        auto createHandle(std::function<T(const T&)> projection) -> Asset<T>
         {
-            #ifndef MAPPED
-            tracker = std::thread( [this]{tracker_run();} );
-            tracker.detach();
-            #endif
+            Derivitate &d = m_derivitives.emplace_back(projection, std::shared_ptr<T>(new T));
+            return {d.val, d.projection};
         }
-        ~AssetManager()
+        auto getHandle() -> Asset<T>
         {
-            run = false;
-            tracker.join();
+            return {m_root, m_info};
         }
 
 
-}
-*/
+    private:
+    };
+};
