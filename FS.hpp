@@ -39,13 +39,13 @@ namespace asspack::fs {
     class EditTracker
     {
     public:
-            virtual auto has_changed(const path &file) -> bool = 0; // TODO Thread safe
+            virtual auto has_changed(const path &file, file_time from) -> bool = 0; // TODO Thread safe
+            virtual auto getTime(const path &file) -> file_time;
     };
 
     class Storage : public FS, public EditTracker
     {
         std::unordered_map<path, Info> m_files; // TODO Thread safe
-        std::unordered_map<path, file_time> m_edits;
         path m_directory;
 
     public:
@@ -55,17 +55,19 @@ namespace asspack::fs {
         auto load(const path &file) -> std::span<uint8_t> override // TODO atomic usage counter
         {
             m_files[file] = {read(m_directory/file)};
-            m_edits[file] = {std::filesystem::last_write_time(file)};
             return m_files[file].data;
         }
         auto unload(const path &file) -> void override
         {
             m_files.erase(file);
         }
-        auto has_changed(const path &file) -> bool override
+        auto has_changed(const path &file, file_time from) -> bool override
         {
-            if(!m_edits.contains(file)) return true;
-            return std::filesystem::last_write_time(file)!=m_edits[file];
+            return std::filesystem::last_write_time(file)!=from;
+        }
+        auto getTime(const path &file) -> file_time override
+        {
+            return std::filesystem::last_write_time(file);
         }
         auto contains(const path &file) -> bool override
         {
@@ -165,6 +167,12 @@ namespace asspack::fs {
         };
         std::unordered_map<path, FileInfo> m_files;
         std::list<FSInfo> m_sources;
+        auto getFileFS(const path &file)
+        {
+            auto it = std::ranges::find_if(m_sources, [&file](auto &info){return info.fs->contains(file);});
+            assert(it!=m_sources.end());
+            return it;
+        }
     public:
         template<class F>
             requires std::is_base_of_v<FS, F>
@@ -190,8 +198,7 @@ namespace asspack::fs {
 
         auto load(const path &file) -> std::span<uint8_t> override
         {
-            auto it = std::ranges::find_if(m_sources, [&file](auto &info){return info.fs->contains(file);});
-            assert(it!=m_sources.end());
+            auto it = getFileFS(file);
             if(m_files.contains(file)) m_files[file].source->unload(file);
             m_files[file].source = it->fs.get();
             return it->fs->load(file);
@@ -200,16 +207,21 @@ namespace asspack::fs {
         {
             m_files[file].source->unload(file);
         }
-        auto has_changed(const path &file) -> bool override
+        auto has_changed(const path &file, file_time from) -> bool override
         {
-            auto it = std::ranges::find_if(m_sources, [&file](FSInfo &info){return info.fs->contains(file);});
-            assert(it!=m_sources.end());
+            auto it = getFileFS(file);
 
             if(m_files.contains(file) && m_files[file].source!=it->fs.get()) return true; // if source changes prop best to assume data changed
 
             if(auto *t = dynamic_cast<EditTracker*>(it->fs.get()); t!=nullptr)
-                return t->has_changed(file);
+                return t->has_changed(file, from);
             return false;
+        }
+        auto getTime(const path &file) -> file_time override
+        {
+            auto it = getFileFS(file);
+            if(auto *t = dynamic_cast<EditTracker*>(it->fs.get())) return t->getTime(file);
+            return {};
         }
         auto contains(const path &file) -> bool override
         {
@@ -221,7 +233,7 @@ namespace asspack::fs {
     class DependencyTracker : public FS
     {
         const path m_save;
-        std::unordered_set<path> dependencies;
+        std::unordered_set<path> dependencies; // TODO Thread safety
     public:
         DependencyTracker(path save = "")
             : m_save(std::move(save))

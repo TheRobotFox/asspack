@@ -4,19 +4,18 @@
 #include "FS.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <execution>
 #include <pstl/glue_execution_defs.h>
 #include <string>
 #include <functional>
 #include <list>
 #include <memory>
 #include <thread>
-#include <tuple>
 #include <unordered_map>
 
 namespace asspack{
@@ -37,10 +36,13 @@ namespace asspack{
 
     class AssetManager
     {
-    public:
     private:
+            // static inline std::size_t _counter = 0;
+            // template<typename T>
+            // static inline std::size_t typeIdx = _counter++; // for Asset<T> Groups (maybe faster)
+
         class AssetGroupIface {
-            virtual auto fetch(fs::FS *fs) -> void = 0;
+            virtual auto preload(std::span<uint8_t> data) -> void = 0;
             virtual auto update() -> void = 0;
         };
 
@@ -57,7 +59,6 @@ namespace asspack{
                 Info::State state;
             };
 
-            fs::path m_file;
             std::shared_ptr<T> m_root {};
             std::optional<Update> m_update {};
             Info m_info {};
@@ -67,25 +68,32 @@ namespace asspack{
             std::mutex m_mtxSet;
         public:
             auto update() -> void;
-            auto fetch(fs::FS *fs) -> void override;
+            auto preload(std::span<uint8_t> data) -> void override;
             auto createHandle(std::function<T(const T&)> projection) -> Asset<T>;
             auto getHandle() -> Asset<T>;
         };
 
-        template<typename T>
-        static auto getAssetGroup(const std::string &name) -> Assets<T>&
+        auto preload(const fs::path &file, AssetGroupIface *asset) -> void
         {
-            if(!m_data<T>.contains(name)){
-
-                m_data<T>[name]={std::shared_ptr<T>(new T)};
-
-                if(m_fs){
-                    reload(name, m_data<T>[name]);
-                    update(m_data<T>[name]);
-                }
-
+            if(!m_fs->contains(file)) return;
+            auto *t = dynamic_cast<fs::EditTracker*>(m_fs.get());
+            if(t==nullptr || t->has_changed(const path &file, file_time from))
+        }
+        template<typename T>
+        auto getAssetGroup(const std::string &name) -> AssetGroup<T>*
+        {
+            if(m_data.contains(name)){
+                auto *p = dynamic_cast<AssetGroup<T>*>(m_data[name].get());
+                assert(p);
+                return p;
             }
-            return  m_data<T>[name];
+            m_data[name] = std::make_unique<AssetGroup<T>>(new AssetGroup<T>(name));
+
+            if(m_fs){
+                m_data[name]->preload();
+                update(m_data<T>[name]);
+            }
+
         }
     public:
         static auto Tracker() -> void
@@ -130,7 +138,6 @@ namespace asspack{
         template<typename T>
         auto get(const std::string &name) -> AssetHandle<T>
         {
-            if(m_data.contains(name)) return {m_data[name]->}
         }
         template<typename T>
         auto get(const std::string &name, std::function<T(T)> &&map) -> AssetHandle<T>
@@ -142,7 +149,6 @@ namespace asspack{
         std::thread tracker;
         bool run = true;
         std::unordered_map<std::string, std::unique_ptr<AssetGroupIface>> m_data {};
-
         std::unique_ptr<fs::FS> m_fs {};
     };
 
