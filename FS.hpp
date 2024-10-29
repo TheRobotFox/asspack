@@ -22,74 +22,66 @@ namespace asspack::fs {
     using path = std::filesystem::path;
     using file_time = std::filesystem::file_time_type;
 
-    class FileData;
-
     class FS
     {
     public:
-        struct Info {
-            std::vector<uint8_t> data;
-        };
-        virtual auto load(const path &) -> std::span<uint8_t> = 0;
-        virtual auto contains(const path &) -> bool = 0;
-        virtual auto unload(const path &) -> void = 0;
+        virtual auto load(const path &) const -> std::span<const uint8_t> = 0;
+        virtual auto contains(const path &) const -> bool = 0;
+            virtual auto unload(std::span<const uint8_t> *data) const -> void = 0;
         virtual ~FS() = default;
     };
 
     class EditTracker
     {
     public:
-            virtual auto has_changed(const path &file, file_time from) -> bool = 0; // TODO Thread safe
-            virtual auto getTime(const path &file) -> file_time;
+            virtual auto has_changed(const path &file, file_time from) const -> bool = 0; // TODO Thread safe
+            virtual auto getTime(const path &file) const -> file_time = 0;
     };
 
     class Storage : public FS, public EditTracker
     {
-        std::unordered_map<path, Info> m_files; // TODO Thread safe
-        path m_directory;
+        const path m_directory;
 
     public:
         Storage(path directory="") : m_directory(std::move(directory))
         {}
 
-        auto load(const path &file) -> std::span<uint8_t> override // TODO atomic usage counter
+        auto load(const path &file) const -> std::span<const uint8_t> override
         {
-            m_files[file] = {read(m_directory/file)};
-            return m_files[file].data;
+            return read(m_directory/file);
         }
-        auto unload(const path &file) -> void override
+        auto unload(std::span<const uint8_t> *data) const -> void override
         {
-            m_files.erase(file);
+            delete [] data->data();
+            *data = {};
         }
-        auto has_changed(const path &file, file_time from) -> bool override
+        auto has_changed(const path &file, file_time from) const -> bool override
         {
             return std::filesystem::last_write_time(file)!=from;
         }
-        auto getTime(const path &file) -> file_time override
+        auto getTime(const path &file) const -> file_time override
         {
             return std::filesystem::last_write_time(file);
         }
-        auto contains(const path &file) -> bool override
+        auto contains(const path &file) const -> bool override
         {
             return std::filesystem::exists(file);
         }
 
-        static auto read(const path &path) -> std::vector<uint8_t>
+        static auto read(const path &path) -> std::span<uint8_t>
         {
             std::ifstream file(path, std::ios::binary | std::ios::ate);
             file.unsetf(std::ios::skipws);
 
-            std::vector<uint8_t> res;
-            res.reserve(static_cast<std::size_t>(file.tellg()));
+            std::size_t length = static_cast<std::size_t>(file.tellg());
+            auto *data = new uint8_t[length];
             file.seekg(0, std::ios::beg);
-            std::copy(std::istream_iterator<uint8_t>(file),
-                    std::istream_iterator<uint8_t>(),
-                    std::back_inserter(res));
-            return res;
+            file.read(reinterpret_cast<char*>(data), length);
+            return {data, length};
         }
     };
 
-    class Memory : public FS
+    /*class Memory : public FS
     {
         struct Block {
             std::size_t offset;
@@ -98,23 +90,37 @@ namespace asspack::fs {
 
     protected:
         using Header = std::unordered_map<path, Block>;
+        const std::optional<std::span<const uint8_t>> m_own {};
         Header m_header;
-        std::optional<std::vector<uint8_t>> m_own {};
-        std::span<uint8_t> m_data;
+        std::span<const uint8_t> m_data;
 
         template<class T>
-        static auto read(uint8_t *&ptr) -> T
+        static auto read(const uint8_t *&ptr) -> T
         {
-            T res = *reinterpret_cast<T*>(ptr);
+            T res = *reinterpret_cast<const T*>(ptr);
             ptr+=sizeof(T);
             return res;
         }
-        static auto read_name(uint8_t *&ptr) -> std::string_view
+        static auto read_name(const uint8_t *&ptr) -> std::string_view
         {
             auto len = read<uint16_t>(ptr);
-            std::string_view name(reinterpret_cast<char*>(ptr), len);
+            std::string_view name(reinterpret_cast<const char*>(ptr), len);
             ptr+=len;
             return name;
+        }
+        auto from_span(std::span<const uint8_t> data) -> void
+        {
+            const uint8_t *ptr = data.data();
+            auto entries = read<uint16_t>(ptr);
+
+            while(entries-- > 0) {
+                auto name = read_name(ptr);
+                auto offset = read<std::size_t>(ptr);
+                auto size = read<std::size_t>(ptr);
+
+                m_header[name] = {offset, size};
+            }
+            m_data = {ptr, m_data.end().base()};
         }
     public:
 
@@ -127,35 +133,23 @@ namespace asspack::fs {
         {
             from_span(data);
         }
-        auto from_span(std::span<uint8_t> data) ->void
+
+        auto load(const path &file) const -> std::span<const uint8_t> override
         {
-            uint8_t *ptr = data.data();
-            auto entries = read<uint16_t>(ptr);
-
-            while(entries-- > 0) {
-                auto name = read_name(ptr);
-                auto offset = read<std::size_t>(ptr);
-                auto size = read<std::size_t>(ptr);
-
-                m_header[name] = {offset, size};
-            }
-            m_data = {ptr, m_data.end().base()};
-        }
-
-        auto load(const path &file) -> std::span<uint8_t> override
-        {
-            Block b = m_header[file];
+            const Block &b = m_header.at(file);
             return m_data.subspan(b.offset, b.size);
         }
-        auto unload(const path & /* ignore */) -> void override
-        {}
-        auto contains(const path &file) -> bool override
+        auto unload(std::span<const uint8_t> *data) const -> void override
+        {
+            *data = {};
+        }
+        auto contains(const path &file) const -> bool override
         {
             return m_header.contains(file);
         }
-    };
+        };*/
 
-    class AssetFiles : public FS, public EditTracker
+    /*class AssetFiles : public FS, public EditTracker
     {
         // maybe setting to keep initial FS from cache
         struct FileInfo {
@@ -196,7 +190,7 @@ namespace asspack::fs {
             m_sources.erase(it);
         }
 
-        auto load(const path &file) -> std::span<uint8_t> override
+        auto load(const path &file) const -> std::span<uint8_t> override
         {
             auto it = getFileFS(file);
             if(m_files.contains(file)) m_files[file].source->unload(file);
@@ -228,7 +222,7 @@ namespace asspack::fs {
             auto it = std::ranges::find_if(m_sources, [&file](auto &info){return info.fs->contains(file);});
             return it!=m_sources.end();
         }
-    };
+    };*/
 
     class DependencyTracker : public FS
     {

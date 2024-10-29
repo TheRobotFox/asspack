@@ -6,16 +6,16 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <pstl/glue_execution_defs.h>
+#include <execution>
 #include <string>
 #include <functional>
-#include <list>
-#include <memory>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 
 namespace asspack{
@@ -25,7 +25,7 @@ namespace asspack{
 
     struct Info {
         enum State {
-            NONE,
+            NONE = 0,
             LOADED,
             BROKEN,
             NOFILE
@@ -34,51 +34,121 @@ namespace asspack{
         uint32_t version {};
     };
 
+    class AssetGroupIface {
+    public:
+        virtual auto preload(const fs::path &file, const fs::FS *fs) -> void = 0;
+        virtual auto update() -> void = 0;
+        virtual auto destroyOrphans() -> int = 0;
+        virtual ~AssetGroupIface() = default;
+    };
+
+    template<typename T>
+    class AssetGroup : public AssetGroupIface
+    {
+    public:
+        class Derivitive {
+            std::function<T(const T&)> m_projection;
+            std::shared_ptr<T> m_val;
+            T m_prefetched;
+            public:
+                Derivitive(std::function<T(const T&)> projection)
+                    : m_projection(projection),
+                        m_val(new T)
+                {}
+
+            auto preload(const T &root)
+            { m_prefetched = m_projection(root);}
+
+            auto update()
+            { *m_val = m_prefetched;}
+
+            auto isDead() const -> bool
+            {
+                return m_val.use_count()<=1;
+            }
+            auto getHandle(Info &parrent) -> Asset<T>
+            {
+                return {m_val, parrent};
+            }
+        };
+    private:
+        struct Update {
+            T val;
+            Info::State state;
+        };
+
+        std::shared_ptr<T> m_root;
+        std::optional<Update> m_update {};
+        Info m_info {};
+        std::list<Derivitive> m_derivitives {};
+        fs::file_time m_lastChange {};
+
+        std::mutex m_mtxUpd;
+        auto preload_default(Info::State state) const -> Update
+        {return {Asset<T>::getDefault(state), state};}
+
+        auto fetch(const fs::path &file, const fs::FS *fs) const -> std::optional<Update>
+        {
+            if(!fs->contains(file)) return preload_default(Info::State::NOFILE);
+
+            const auto *t = dynamic_cast<const fs::EditTracker*>(fs);
+            if(t==nullptr || !t->has_changed(file, m_lastChange)) return {};
+
+            auto data = fs->load(file);
+            auto asset = Asset<T>::load(data);
+            fs->unload(&data); // TODO allow Asset to own memory?
+
+            if(!asset) return preload_default(Info::State::BROKEN);
+
+            return Update{std::move(*asset), Info::State::LOADED};
+        }
+
+    public:
+        AssetGroup()
+            : m_root(new T)
+        {}
+        auto update() -> void override
+        {
+            if(!(m_update && m_mtxUpd.try_lock())) return;
+
+            *m_root = std::move(m_update.value().val);
+            m_info.state = m_update.value().state;
+            m_info.version++;
+            std::for_each(std::execution::par, m_derivitives.begin(), m_derivitives.end(), [](auto &d){d.update();});
+
+            m_mtxUpd.unlock();
+        }
+        auto preload(const fs::path &file, const fs::FS *fs) -> void override
+        {
+            std::optional<Update> update;
+            if(!(update = fetch(file, fs))) return;
+
+            std::lock_guard<std::mutex> lock(m_mtxUpd);
+
+            m_update = std::move(update);
+            std::for_each(std::execution::par, m_derivitives.begin(), m_derivitives.end(),
+                            [&newVal=m_update.value().val](Derivitive &d){d.preload(newVal);});
+        }
+        auto destroyOrphans() -> int override
+        {
+            int res = std::ranges::count_if(m_derivitives, &Derivitive::isDead);
+            if(res>0) std::erase_if(m_derivitives, [](auto &d){return d.isDead();});
+            return res;
+        }
+        auto createDerivitive(std::function<T(const T&)> projection) -> Asset<T>
+        {
+            return m_derivitives.emplace_back(projection).getHandle(m_info);
+        }
+        auto getHandle() -> Asset<T>
+        {
+            return {m_root, m_info};
+        }
+    };
+
     class AssetManager
     {
-    private:
-            // static inline std::size_t _counter = 0;
-            // template<typename T>
-            // static inline std::size_t typeIdx = _counter++; // for Asset<T> Groups (maybe faster)
 
-        class AssetGroupIface {
-            virtual auto preload(std::span<uint8_t> data) -> void = 0;
-            virtual auto update() -> void = 0;
-        };
 
-        template<typename T>
-        class AssetGroup : public AssetGroupIface
-        {
-            struct Derivitate {
-                std::function<T(const T&)> projection;
-                std::shared_ptr<T> val {};
-                std::optional<T> update;
-            };
-            struct Update {
-                T val;
-                Info::State state;
-            };
-
-            std::shared_ptr<T> m_root {};
-            std::optional<Update> m_update {};
-            Info m_info {};
-            std::list<Derivitate> m_derivitives {};
-
-            std::mutex m_mtxUpd;
-            std::mutex m_mtxSet;
-        public:
-            auto update() -> void;
-            auto preload(std::span<uint8_t> data) -> void override;
-            auto createHandle(std::function<T(const T&)> projection) -> Asset<T>;
-            auto getHandle() -> Asset<T>;
-        };
-
-        auto preload(const fs::path &file, AssetGroupIface *asset) -> void
-        {
-            if(!m_fs->contains(file)) return;
-            auto *t = dynamic_cast<fs::EditTracker*>(m_fs.get());
-            if(t==nullptr || t->has_changed(const path &file, file_time from))
-        }
         template<typename T>
         auto getAssetGroup(const std::string &name) -> AssetGroup<T>*
         {
@@ -87,19 +157,26 @@ namespace asspack{
                 assert(p);
                 return p;
             }
-            m_data[name] = std::make_unique<AssetGroup<T>>(new AssetGroup<T>(name));
+            m_data[name] = std::make_unique<AssetGroup<T>>();
 
             if(m_fs){
-                m_data[name]->preload();
-                update(m_data<T>[name]);
+                m_data[name]->preload(name, m_fs.get());
+                m_data[name]->update();
             }
-
+            return dynamic_cast<AssetGroup<T>*>(m_data[name].get());
+        }
+        static auto foreachAsset(std::unordered_map<fs::path, std::unique_ptr<AssetGroupIface>> &assets,
+                                    std::function<void(const fs::path&, std::unique_ptr<AssetGroupIface>&)> f)
+        {
+            std::for_each(std::execution::par, assets.begin(), assets.end(), [f](auto &pair){
+                std::apply(f, pair);
+            });
         }
     public:
-        static auto Tracker() -> void
+        auto Tracker() -> void
         {
-            tracker = std::thread([&run=run,
-                                   &reloadFn=m_reloadFunctions,
+            m_tracker = std::thread([&run=run,
+                                     &assets=m_data,
                                    &fs=m_fs,
                                    &mtxFS=m_mtxFs]{
                 while(run){
@@ -107,75 +184,80 @@ namespace asspack{
 
                     std::lock_guard<std::mutex> fsLock(mtxFS);
                     if(!fs) continue;
-
-                    std::for_each(std::execution::par,
-                                  reloadFn.begin(),
-                                  reloadFn.end(),
-                                  [](auto fn){fn();});
+                    foreachAsset(assets,
+                                 [fs=fs.get()](auto &file, auto &asset)
+                                 {asset->preload(file, fs);
+                                     asset->destroyOrphans();});
                 }
             });
-            tracker.detach();
+            m_tracker.detach();
         }
 
-        static auto setFS(std::unique_ptr<fs::FS> fs) -> void
+        auto setFS(std::unique_ptr<fs::FS> fs) -> void
         {
             m_mtxFs.lock();
             m_fs = std::move(fs);
 
-            // std::ranges::for_each(m_reloadFunctions, &std::function<void()>::operator());
+            foreachAsset(m_data, [fs=m_fs.get()](auto &file, auto &asset){
+                asset->preload(file, fs);
+            });
 
             m_mtxFs.unlock();
             update();
         }
-        static auto update() -> void
+        auto update() -> void
         {
-            std::for_each(std::execution::par,
-                          m_updateFunctions.begin(),
-                          m_updateFunctions.end(),
-                          [](auto &fn){fn();});
+            foreachAsset(m_data, [fs=m_fs.get()](auto & /* ignore */, auto &asset)
+                {
+                    asset->update();
+                });
         }
 
         template<typename T>
-        auto get(const std::string &name) -> AssetHandle<T>
+        auto get(const std::string &name) -> Asset<T>
         {
+            return getAssetGroup<T>(name)->getHandle();
         }
         template<typename T>
-        auto get(const std::string &name, std::function<T(T)> &&map) -> AssetHandle<T>
+        auto get(const std::string &name, std::function<T(T)> &&projection) -> Asset<T>
         {
+            return getAssetGroup<T>(name)->createDerivitive(projection);
         }
 
     private:
 
-        std::thread tracker;
+        std::thread m_tracker;
         bool run = true;
-        std::unordered_map<std::string, std::unique_ptr<AssetGroupIface>> m_data {};
-        std::unique_ptr<fs::FS> m_fs {};
+        std::unordered_map<fs::path, std::unique_ptr<AssetGroupIface>> m_data;
+        std::unique_ptr<fs::FS> m_fs;
+        std::mutex m_mtxFs;
     };
 
     template<typename T>
     class Asset
     {
-        friend AssetManager;
+        friend AssetGroup<T>;
+        friend typename AssetGroup<T>::Derivitive;
 
         std::shared_ptr<T> m_val;
 
-        const AssetManager::Info &m_info;
+        const Info &m_info;
         int m_localVersion;
-        Asset(std::shared_ptr<T> val, const AssetManager::Info &info)
+        Asset(std::shared_ptr<T> val, const Info &info)
             : m_val(std::move(val)),
                 m_info(info),
                 m_localVersion(info.version)
         {}
-        static auto load(const std::span<uint8_t> /* ignore */) -> std::optional<T> {
+        static auto load(const std::span<const uint8_t> /* ignore */) -> std::optional<T> {
             static_assert(false, "Asset::load was not Implemented for used Type!\nPlease supply via template Specialisation");
         };
-        static auto getDefault(AssetManager::Info::State state) -> T& {
+        static auto getDefault(Info::State /* ignore */) -> T& {
             static T obj{};
             return obj;
         }
     public:
         auto get() -> const T& {
-            if(m_info.state==AssetManager::Info::State::LOADED)
+            if(m_info.state==Info::State::LOADED)
                 return *m_val;
             return Asset<T>::getDefault(m_info.state);
         }
